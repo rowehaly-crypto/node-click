@@ -245,8 +245,7 @@ m3() {
   echo; echo -e "${W}${C}NPM 登录信息${N}"; echo
   local ip port; ip=$(detect_ip); port=$(get_npm_port)
   echo -e "  ${W}地址:${N} ${G}http://${ip}:${port}${N}"
-  echo -e "  ${W}账号:${N} admin@example.com"
-  echo -e "  ${W}密码:${N} changeme（首次登录强制修改）"
+  echo -e "  ${W}首次访问:${N} 页面会引导你创建管理员账号"
   echo; compose_ok && compose ps 2>/dev/null || warn "无法获取容器状态"
 }
 
@@ -357,7 +356,7 @@ do_finish() {
   echo "  ╚══════════════════════════════════╝"
   echo
   echo -e "  NPM 后台:  http://${ip}:${NPM_ADMIN_PORT}"
-  echo -e "  默认账号:  admin@example.com / changeme"
+  echo -e "  首次访问会引导创建管理员账号"
   echo -e "  管理菜单:  ling"
   echo
 }
