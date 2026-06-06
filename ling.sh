@@ -158,6 +158,8 @@ services:
       - '80:80'
       - '443:443'
       - '${NPM_ADMIN_PORT}:81'
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/data
       - ./letsencrypt:/etc/letsencrypt
@@ -223,6 +225,13 @@ compose() {
   else (cd "$NPM_DIR" && run docker-compose "$@"); fi
 }
 
+check_xbctl() {
+  command -v xbctl >/dev/null 2>&1 && return 0
+  [ -x /usr/local/bin/xbctl ] && { export PATH="/usr/local/bin:$PATH"; return 0; }
+  [ -x /usr/bin/xbctl ] && { export PATH="/usr/bin:$PATH"; return 0; }
+  return 1
+}
+
 # -- 1. 启动 NPM --
 m1() {
   echo; need_root || return 1
@@ -240,13 +249,21 @@ m2() {
   info "重启 NPM..."; compose restart; ok "NPM 已重启"
 }
 
-# -- 3. 查看 NPM 信息 --
+# -- 3. 重启节点 --
 m3() {
-  echo; echo -e "${W}${C}NPM 登录信息${N}"; echo
-  local ip port; ip=$(detect_ip); port=$(get_npm_port)
-  echo -e "  ${W}地址:${N} ${G}http://${ip}:${port}${N}"
-  echo -e "  ${W}首次访问:${N} 页面会引导你创建管理员账号"
-  echo; compose_ok && compose ps 2>/dev/null || warn "无法获取容器状态"
+  echo; echo -e "${W}${C}重启 xboard-node${N}"; echo
+  need_root || return 1
+  # 优先 systemd，回退 xbctl
+  if command -v systemctl >/dev/null 2>&1 && systemctl show xboard-node --property LoadState --value 2>/dev/null | grep -qv "not-found"; then
+    info "systemctl restart xboard-node"
+    run systemctl restart xboard-node && ok "重启完成"
+  elif check_xbctl && run xbctl service restart 2>/dev/null; then
+    ok "xbctl service restart 完成"
+  elif check_xbctl && run xbctl restart 2>/dev/null; then
+    ok "xbctl restart 完成"
+  else
+    err "重启失败，请检查 xboard-node 是否安装"
+  fi
 }
 
 # -- 4. 查看节点状态 --
@@ -260,8 +277,21 @@ m4() {
   fi
 }
 
-# -- 5. 查看端口状态 --
+# -- 5. 查看节点日志 --
 m5() {
+  echo; echo -e "${W}${C}节点日志（最近 30 行）${N}"; echo
+  # 优先 journalctl，回退 xbctl logs
+  if command -v journalctl >/dev/null 2>&1 && journalctl -u xboard-node --no-pager -n 30 2>/dev/null; then
+    :
+  elif check_xbctl && run xbctl logs 2>/dev/null; then
+    :
+  else
+    warn "无法获取日志（xboard-node 可能未安装或未运行）"
+  fi
+}
+
+# -- 6. 查看端口状态 --
+m6() {
   echo; local port
   read -r -e -p "  端口号: " port
   [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || { err "无效端口"; return 1; }
@@ -273,8 +303,8 @@ m5() {
   timeout 3 bash -c "echo >/dev/tcp/127.0.0.1/${port}" 2>/dev/null && ok "本地可连接" || warn "本地不可达"
 }
 
-# -- 6. 放行端口 --
-m6() {
+# -- 7. 放行端口 --
+m7() {
   echo; need_root || return 1
   local port
   read -r -e -p "  端口号: " port
@@ -298,11 +328,12 @@ show() {
   echo -e "${C}  ║${N}    ${Y}—— NPM ——${N}                ${C}║${N}"
   echo -e "${C}  ║${N} ${G}1${N}. 启动 NPM                  ${C}║${N}"
   echo -e "${C}  ║${N} ${G}2${N}. 重启 NPM                  ${C}║${N}"
-  echo -e "${C}  ║${N} ${G}3${N}. 查看 NPM 登录信息         ${C}║${N}"
   echo -e "${C}  ║${N}    ${Y}—— 系统工具 ——${N}            ${C}║${N}"
+  echo -e "${C}  ║${N} ${G}3${N}. 重启节点                  ${C}║${N}"
   echo -e "${C}  ║${N} ${G}4${N}. 查看节点状态              ${C}║${N}"
-  echo -e "${C}  ║${N} ${G}5${N}. 查看端口状态              ${C}║${N}"
-  echo -e "${C}  ║${N} ${G}6${N}. 放行端口                  ${C}║${N}"
+  echo -e "${C}  ║${N} ${G}5${N}. 查看节点日志              ${C}║${N}"
+  echo -e "${C}  ║${N} ${G}6${N}. 查看端口状态              ${C}║${N}"
+  echo -e "${C}  ║${N} ${G}7${N}. 放行端口                  ${C}║${N}"
   echo -e "${C}  ║${N} ${R}0${N}. 退出                      ${C}║${N}"
   echo -e "${C}  ╚══════════════════════════════╝${N}"
   echo
@@ -314,10 +345,10 @@ show() {
 main() {
   while true; do
     show
-    read -r -e -p "  选项 [0-6]: " c
+    read -r -e -p "  选项 [0-7]: " c
     echo; case "$c" in
       1) m1; pause ;; 2) m2; pause ;; 3) m3; pause ;;
-      4) m4; pause ;; 5) m5; pause ;; 6) m6; pause ;;
+      4) m4; pause ;; 5) m5; pause ;; 6) m6; pause ;; 7) m7; pause ;;
       0) ok "已退出。下次输入 ling 进入。"; exit 0 ;;
       *) err "无效选项" ; sleep 1 ;;
     esac
