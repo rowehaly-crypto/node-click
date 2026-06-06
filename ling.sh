@@ -140,7 +140,7 @@ do_npm() {
 
   if [ -t 0 ]; then
     printf '  管理端口 [%s]: ' "$DEFAULT_NPM_PORT"
-    read -r answer || true
+    read -r -e answer || true
     NPM_ADMIN_PORT="${answer:-$DEFAULT_NPM_PORT}"
   else
     NPM_ADMIN_PORT="$DEFAULT_NPM_PORT"
@@ -193,7 +193,7 @@ info()  { echo -e "${B}[INFO]${N} $*"; }
 warn()  { echo -e "${Y}[WARN]${N} $*"; }
 err()   { echo -e "${R}[ERR]${N} $*" >&2; }
 ok()    { echo -e "${G}[OK]${N} $*"; }
-pause() { echo; read -r -p "按回车返回菜单..."; }
+pause() { echo; read -r -e -p "按回车返回菜单..."; }
 
 need_root() { [ "$(id -u)" -eq 0 ] || command -v sudo >/dev/null 2>&1 || { err "需要 root 权限"; return 1; }; }
 run() { [ "$(id -u)" -eq 0 ] && "$@" || sudo "$@"; }
@@ -263,7 +263,7 @@ m4() {
 # -- 5. 查看端口状态 --
 m5() {
   echo; local port
-  read -r -p "  端口号: " port
+  read -r -e -p "  端口号: " port
   [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || { err "无效端口"; return 1; }
   echo; echo -e "${W}端口 ${port}:${N}"; echo
   ss -tlnp 2>/dev/null | grep -q ":${port}\b" && { ok "正在监听"; ss -tlnp 2>/dev/null | grep ":${port}\b" | while read -r l; do echo "  $l"; done; } || warn "未监听"
@@ -277,7 +277,7 @@ m5() {
 m6() {
   echo; need_root || return 1
   local port
-  read -r -p "  端口号: " port
+  read -r -e -p "  端口号: " port
   [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || { err "无效端口"; return 1; }
   if command -v ufw >/dev/null 2>&1; then
     run ufw allow "${port}/tcp" && ok "UFW 已放行 ${port}/tcp"
@@ -314,7 +314,7 @@ show() {
 main() {
   while true; do
     show
-    read -r -p "  选项 [0-6]: " c
+    read -r -e -p "  选项 [0-6]: " c
     echo; case "$c" in
       1) m1; pause ;; 2) m2; pause ;; 3) m3; pause ;;
       4) m4; pause ;; 5) m5; pause ;; 6) m6; pause ;;
