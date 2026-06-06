@@ -2,711 +2,248 @@
 set -Eeuo pipefail
 
 # ============================================================
-# xboard-node + NPM 运维管理菜单 (ling 命令)
+# xboard-node + NPM 运维管理菜单
+# 用法: ling  或  bash menu.sh
 # ============================================================
 
-PROJECT_NAME="ling-menu"
 NPM_DIR="/npm"
-XBOARD_NODE_INSTALL_SCRIPT="/etc/xboard-node/install.sh"
-XBOARD_NODE_SERVICE="xboard-node"
+XBN_SERVICE="xboard-node"
+XBN_INSTALL="/etc/xboard-node/install.sh"
 
-# ---------- 颜色 ----------
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; B='\033[0;34m'; C='\033[0;36m'; W='\033[1m'; N='\033[0m'
+info()  { echo -e "${B}[INFO]${N} $*"; }
+warn()  { echo -e "${Y}[WARN]${N} $*"; }
+err()   { echo -e "${R}[ERR]${N} $*" >&2; }
+ok()    { echo -e "${G}[OK]${N} $*"; }
 
-# ---------- 日志 ----------
-info()    { echo -e "${BLUE}[INFO]${NC} $*"; }
-warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
-error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
-success() { echo -e "${GREEN}[OK]${NC} $*"; }
-title()   { echo -e "${BOLD}${CYAN}$*${NC}"; }
+pause() { echo; read -r -p "按回车返回菜单..."; }
 
-# ---------- 工具函数 ----------
-pause() {
-  echo ""
-  read -r -p "按回车键返回菜单..."
+need_root() {
+  [ "$(id -u)" -eq 0 ] && return 0
+  command -v sudo >/dev/null 2>&1 && return 0
+  err "需要 root 权限"; return 1
 }
+run() { [ "$(id -u)" -eq 0 ] && "$@" || sudo "$@"; }
 
-need_root_or_sudo() {
-  if [ "$(id -u)" -eq 0 ]; then
-    return 0
-  fi
-  if command -v sudo >/dev/null 2>&1; then
-    return 0
-  fi
-  error "此操作需要 root 权限。请使用 root 用户运行，或安装 sudo。"
-  return 1
-}
-
-run_privileged() {
-  if [ "$(id -u)" -eq 0 ]; then
-    "$@"
-  else
-    sudo "$@"
-  fi
-}
-
-is_ipv4() {
-  [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
-}
-
-fetch_public_ip() {
-  local value
-  for url in "https://api.ipify.org" "https://ipv4.icanhazip.com" "https://ifconfig.me/ip"; do
-    value="$(curl -4fsSL --max-time 5 "$url" 2>/dev/null | \
-      awk 'NF {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0); print; exit}' || true)"
-    if is_ipv4 "$value"; then printf '%s' "$value"; return 0; fi
-  done
-  return 1
-}
-
-fetch_local_ip() {
-  local value
-  if command -v ip >/dev/null 2>&1; then
-    value="$(ip route get 1.1.1.1 2>/dev/null | \
-      awk '/src/ {for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true)"
-    if is_ipv4 "$value"; then printf '%s' "$value"; return 0; fi
-  fi
-  value="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
-  if is_ipv4 "$value"; then printf '%s' "$value"; return 0; fi
-  return 1
-}
-
+is_ipv4() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 detect_ip() {
   local ip
-  ip="$(fetch_public_ip || true)"
-  if is_ipv4 "$ip"; then echo "$ip"; return 0; fi
-  ip="$(fetch_local_ip || true)"
-  if is_ipv4 "$ip"; then echo "$ip"; return 0; fi
-  echo "你的服务器IP"
+  for u in "https://api.ipify.org" "https://ipv4.icanhazip.com" "https://ifconfig.me/ip"; do
+    ip=$(curl -4fsSL --max-time 5 "$u" 2>/dev/null | awk 'NF{print;exit}' || true)
+    is_ipv4 "$ip" && { echo "$ip"; return 0; }
+  done
+  ip=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
+  is_ipv4 "$ip" && { echo "$ip"; return 0; }
+  echo "服务器IP"
 }
 
 get_npm_port() {
-  # 从 docker-compose.yml 中解析 NPM 管理端口
-  if [ -f "${NPM_DIR}/docker-compose.yml" ]; then
-    grep -E "^[[:space:]]*-[[:space:]]*'[0-9]+:81'" "${NPM_DIR}/docker-compose.yml" 2>/dev/null | \
-      head -1 | sed -E "s/.*'([0-9]+):81'.*/\1/" || echo "81"
-  elif [ -f "${NPM_DIR}/compose.yaml" ]; then
-    grep -E "^[[:space:]]*-[[:space:]]*\"?[0-9]+:81\"?" "${NPM_DIR}/compose.yaml" 2>/dev/null | \
-      head -1 | sed -E 's/.*"([0-9]+):81".*/\1/' || echo "81"
-  else
-    echo "81"
-  fi
+  [ -f "${NPM_DIR}/docker-compose.yml" ] || [ -f "${NPM_DIR}/compose.yaml" ] || { echo "81"; return; }
+  local f="${NPM_DIR}/docker-compose.yml"
+  [ -f "$f" ] || f="${NPM_DIR}/compose.yaml"
+  grep -E "^[[:space:]]*-[[:space:]]*'?[0-9]+:81'?" "$f" 2>/dev/null | head -1 | sed -E "s/.*'?([0-9]+):81.*/\1/" || echo "81"
 }
 
 check_xbctl() {
-  if command -v xbctl >/dev/null 2>&1; then
-    return 0
-  fi
-  if [ -x /usr/local/bin/xbctl ]; then
-    export PATH="/usr/local/bin:$PATH"
-    return 0
-  fi
-  if [ -x /usr/bin/xbctl ]; then
-    export PATH="/usr/bin:$PATH"
-    return 0
-  fi
+  command -v xbctl >/dev/null 2>&1 && return 0
+  [ -x /usr/local/bin/xbctl ] && { export PATH="/usr/local/bin:$PATH"; return 0; }
+  [ -x /usr/bin/xbctl ] && { export PATH="/usr/bin:$PATH"; return 0; }
   return 1
 }
 
-check_compose() {
+compose_ok() { docker compose version >/dev/null 2>&1 || command -v docker-compose >/dev/null 2>&1; }
+compose() {
   if docker compose version >/dev/null 2>&1; then
-    return 0
-  fi
-  if command -v docker-compose >/dev/null 2>&1; then
-    return 0
-  fi
-  return 1
-}
-
-run_compose() {
-  if docker compose version >/dev/null 2>&1; then
-    (cd "$NPM_DIR" && run_privileged docker compose "$@")
+    (cd "$NPM_DIR" && run docker compose "$@")
   else
-    (cd "$NPM_DIR" && run_privileged docker-compose "$@")
+    (cd "$NPM_DIR" && run docker-compose "$@")
   fi
 }
 
-# ============================================================
-# Menu Functions
-# ============================================================
-
-# 1. 查看 xboard node 服务状态
-menu_status() {
-  echo ""
-  title "══════════════════════════════════════════"
-  title "  xboard-node 服务状态"
-  title "══════════════════════════════════════════"
-  echo ""
-
-  # 使用 ss 查看相关端口
-  echo -e "${BOLD}📡 监听端口 (xboard / sing-box / xray):${NC}"
-  if command -v ss >/dev/null 2>&1; then
-    ss -tlnp 2>/dev/null | grep -E 'xboard|sing-box|xray' || echo "  未检测到相关进程。"
-  elif command -v netstat >/dev/null 2>&1; then
-    netstat -tlnp 2>/dev/null | grep -E 'xboard|sing-box|xray' || echo "  未检测到相关进程。"
-  else
-    warn "ss / netstat 均不可用，无法检测端口。"
-  fi
-
-  echo ""
-  echo -e "${BOLD}🔧 systemd 服务状态:${NC}"
+# -- 1. 查看 xboard-node 状态 --
+m1() {
+  echo; echo -e "${W}${C}xboard-node 服务状态${N}"; echo
+  echo -e "${W}监听端口 (xboard/sing-box/xray):${N}"
+  ss -tlnp 2>/dev/null | grep -E 'xboard|sing-box|xray' || echo "  未检测到"
+  echo; echo -e "${W}systemd:${N}"
   if command -v systemctl >/dev/null 2>&1; then
-    local state active enabled
-    state=$(systemctl show "$XBOARD_NODE_SERVICE" --property LoadState --value 2>/dev/null || echo "not-found")
-    if [ "$state" = "not-found" ] || [ -z "$state" ]; then
-      warn "xboard-node 服务未安装或不存在。"
-    else
-      active=$(systemctl is-active "$XBOARD_NODE_SERVICE" 2>/dev/null || echo "unknown")
-      enabled=$(systemctl is-enabled "$XBOARD_NODE_SERVICE" 2>/dev/null || echo "unknown")
-      echo "  LoadState:  ${state}"
-      echo "  Active:     ${active}"
-      echo "  Enabled:    ${enabled}"
-      echo ""
-      systemctl status "$XBOARD_NODE_SERVICE" --lines=10 --no-pager 2>/dev/null || true
-    fi
-  else
-    warn "systemctl 不可用。"
-  fi
-
-  echo ""
-  echo -e "${BOLD}📋 xbctl 实例信息:${NC}"
-  if check_xbctl; then
-    xbctl list 2>/dev/null || echo "  无法获取实例列表。"
-  else
-    warn "xbctl 未找到。请检查 xboard-node 是否正确安装。"
-  fi
+    local s; s=$(systemctl show "$XBN_SERVICE" --property LoadState --value 2>/dev/null || echo "not-found")
+    [ "$s" = "not-found" ] && { warn "xboard-node 服务未安装"; return; }
+    echo "  LoadState: $s"
+    echo "  Active:    $(systemctl is-active "$XBN_SERVICE" 2>/dev/null || echo unknown)"
+    echo "  Enabled:   $(systemctl is-enabled "$XBN_SERVICE" 2>/dev/null || echo unknown)"
+  else warn "systemctl 不可用"; fi
+  echo; echo -e "${W}xbctl:${N}"
+  check_xbctl && xbctl list 2>/dev/null || warn "xbctl 不可用"
 }
 
-# 2. 启动 xboard node 服务
-menu_xb_start() {
-  echo ""
-  title "══════════════════════════════════════════"
-  title "  启动 xboard-node 服务"
-  title "══════════════════════════════════════════"
-  echo ""
-
-  if ! need_root_or_sudo; then return 1; fi
-
-  local started=0
-
-  # 尝试 xbctl start
-  if check_xbctl; then
-    info "执行: xbctl start"
-    if run_privileged xbctl start 2>/dev/null; then
-      success "xbctl start 执行成功。"
-      started=1
-    else
-      warn "xbctl start 执行失败（可能已启动或配置未完成）。"
-    fi
-  fi
-
-  # 尝试 systemd service start
-  if command -v systemctl >/dev/null 2>&1; then
-    if systemctl show "$XBOARD_NODE_SERVICE" --property LoadState --value 2>/dev/null | grep -qv "not-found"; then
-      info "执行: systemctl start ${XBOARD_NODE_SERVICE}"
-      run_privileged systemctl start "$XBOARD_NODE_SERVICE" 2>/dev/null && {
-        success "systemctl start 执行成功。"
-        started=1
-      } || warn "systemctl start 执行失败。"
-    fi
-  fi
-
-  if check_xbctl; then
-    info "执行: xbctl service start"
-    run_privileged xbctl service start 2>/dev/null && {
-      success "xbctl service start 执行成功。"
-      started=1
-    } || warn "xbctl service start 执行失败。"
-  fi
-
-  if [ "$started" -eq 0 ]; then
-    warn "xboard-node 可能已经启动，或者安装不完整。"
-    warn "请先确认已正确绑定 --panel 和 --token（菜单第 7 项）。"
-  fi
+# -- 2. 启动 xboard-node --
+m2() {
+  echo; need_root || return 1
+  local s=0
+  check_xbctl && { info "xbctl start"; run xbctl start 2>/dev/null && { ok "完成"; s=1; } || warn "失败"; }
+  command -v systemctl >/dev/null 2>&1 && systemctl show "$XBN_SERVICE" --property LoadState --value 2>/dev/null | grep -qv "not-found" && {
+    info "systemctl start xboard-node"; run systemctl start "$XBN_SERVICE" 2>/dev/null && { ok "完成"; s=1; } || warn "失败"
+  }
+  check_xbctl && { info "xbctl service start"; run xbctl service start 2>/dev/null && { ok "完成"; s=1; } || warn "失败"; }
+  [ "$s" -eq 0 ] && warn "可能已启动或配置不完整，请先绑定 Panel/Token"
 }
 
-# 3. 启动 Nginx Proxy Manager
-menu_npm_start() {
-  echo ""
-  title "══════════════════════════════════════════"
-  title "  启动 Nginx Proxy Manager"
-  title "══════════════════════════════════════════"
-  echo ""
-
-  if ! need_root_or_sudo; then return 1; fi
-
-  if [ ! -f "${NPM_DIR}/docker-compose.yml" ] && [ ! -f "${NPM_DIR}/compose.yaml" ]; then
-    error "未找到 NPM 配置文件: ${NPM_DIR}/docker-compose.yml"
-    error "请先运行 install.sh 完成 NPM 安装。"
-    return 1
-  fi
-
-  if ! check_compose; then
-    error "Docker Compose 不可用。"
-    return 1
-  fi
-
-  info "启动 Nginx Proxy Manager..."
-  run_compose up -d
-  success "Nginx Proxy Manager 已启动。"
-
-  local npm_port
-  npm_port=$(get_npm_port)
-  echo "  管理后台: http://$(detect_ip):${npm_port}"
+# -- 3. 启动 NPM --
+m3() {
+  echo; need_root || return 1
+  [ -f "${NPM_DIR}/docker-compose.yml" ] || [ -f "${NPM_DIR}/compose.yaml" ] || { err "NPM 未安装"; return 1; }
+  compose_ok || { err "Docker Compose 不可用"; return 1; }
+  info "启动 NPM..."; compose up -d; ok "NPM 已启动"
+  echo "  后台: http://$(detect_ip):$(get_npm_port)"
 }
 
-# 4. 重启 xboard node 服务
-menu_xb_restart() {
-  echo ""
-  title "══════════════════════════════════════════"
-  title "  重启 xboard-node 服务"
-  title "══════════════════════════════════════════"
-  echo ""
-
-  if ! need_root_or_sudo; then return 1; fi
-
-  local done_restart=0
-
-  # xbctl restart
-  if check_xbctl; then
-    info "执行: xbctl restart"
-    if run_privileged xbctl restart 2>/dev/null; then
-      success "xbctl restart 执行成功。"
-      done_restart=1
-    else
-      warn "xbctl restart 失败。"
-    fi
-  fi
-
-  # systemd restart
-  if command -v systemctl >/dev/null 2>&1; then
-    if systemctl show "$XBOARD_NODE_SERVICE" --property LoadState --value 2>/dev/null | grep -qv "not-found"; then
-      info "执行: systemctl restart ${XBOARD_NODE_SERVICE}"
-      run_privileged systemctl restart "$XBOARD_NODE_SERVICE" 2>/dev/null && {
-        success "systemctl restart ${XBOARD_NODE_SERVICE} 成功。"
-        done_restart=1
-      } || warn "systemctl restart 失败。"
-    fi
-  fi
-
-  # xbctl service restart
-  if check_xbctl; then
-    info "执行: xbctl service restart"
-    run_privileged xbctl service restart 2>/dev/null && {
-      success "xbctl service restart 执行成功。"
-      done_restart=1
-    } || warn "xbctl service restart 失败。"
-  fi
-
-  if [ "$done_restart" -eq 0 ]; then
-    error "xboard-node 重启失败。请检查服务状态。"
-  fi
+# -- 4. 重启 xboard-node --
+m4() {
+  echo; need_root || return 1
+  local s=0
+  check_xbctl && { info "xbctl restart"; run xbctl restart 2>/dev/null && { ok "完成"; s=1; } || warn "失败"; }
+  command -v systemctl >/dev/null 2>&1 && systemctl show "$XBN_SERVICE" --property LoadState --value 2>/dev/null | grep -qv "not-found" && {
+    info "systemctl restart"; run systemctl restart "$XBN_SERVICE" 2>/dev/null && { ok "完成"; s=1; } || warn "失败"
+  }
+  check_xbctl && { info "xbctl service restart"; run xbctl service restart 2>/dev/null && { ok "完成"; s=1; } || warn "失败"; }
+  [ "$s" -eq 0 ] && err "重启失败，请检查服务状态"
 }
 
-# 5. 重启 Nginx Proxy Manager
-menu_npm_restart() {
-  echo ""
-  title "══════════════════════════════════════════"
-  title "  重启 Nginx Proxy Manager"
-  title "══════════════════════════════════════════"
-  echo ""
-
-  if ! need_root_or_sudo; then return 1; fi
-
-  if [ ! -f "${NPM_DIR}/docker-compose.yml" ] && [ ! -f "${NPM_DIR}/compose.yaml" ]; then
-    error "未找到 NPM 配置文件。"
-    return 1
-  fi
-
-  if ! check_compose; then
-    error "Docker Compose 不可用。"
-    return 1
-  fi
-
-  info "重启 Nginx Proxy Manager..."
-  run_compose restart
-  success "Nginx Proxy Manager 已重启。"
-
-  local npm_port
-  npm_port=$(get_npm_port)
-  echo "  管理后台: http://$(detect_ip):${npm_port}"
+# -- 5. 重启 NPM --
+m5() {
+  echo; need_root || return 1
+  [ -f "${NPM_DIR}/docker-compose.yml" ] || [ -f "${NPM_DIR}/compose.yaml" ] || { err "NPM 未安装"; return 1; }
+  compose_ok || { err "Docker Compose 不可用"; return 1; }
+  info "重启 NPM..."; compose restart; ok "NPM 已重启"
 }
 
-# 6. 查看 Nginx Proxy Manager 登录地址
-menu_npm_info() {
-  echo ""
-  title "══════════════════════════════════════════"
-  title "  Nginx Proxy Manager 登录信息"
-  title "══════════════════════════════════════════"
-  echo ""
-
-  local server_ip npm_port
-  server_ip=$(detect_ip)
-  npm_port=$(get_npm_port)
-
-  echo -e "  ${BOLD}管理后台地址:${NC}"
-  echo -e "    ${GREEN}http://${server_ip}:${npm_port}${NC}"
-  echo ""
-  echo -e "  ${BOLD}默认登录凭据:${NC}"
-  echo "    邮箱: admin@example.com"
-  echo "    密码: changeme"
-  echo ""
-  echo -e "  ${YELLOW}⚠️  首次登录后会要求修改邮箱和密码。${NC}"
-  echo ""
-  echo -e "  ${BOLD}Docker 状态:${NC}"
-
-  if check_compose; then
-    run_compose ps 2>/dev/null || warn "无法获取 NPM 容器状态。"
-  else
-    warn "Docker Compose 不可用。"
-  fi
+# -- 6. 查看 NPM 登录信息 --
+m6() {
+  echo; echo -e "${W}${C}NPM 登录信息${N}"; echo
+  local ip port; ip=$(detect_ip); port=$(get_npm_port)
+  echo -e "  ${W}地址:${N} ${G}http://${ip}:${port}${N}"
+  echo -e "  ${W}账号:${N} admin@example.com"
+  echo -e "  ${W}密码:${N} changeme（首次登录强制修改）"
+  echo; compose_ok && compose ps 2>/dev/null || warn "无法获取容器状态"
 }
 
-# 7. 为 xboard node 绑定 --panel 和 --token
-menu_bind_panel_token() {
-  echo ""
-  title "══════════════════════════════════════════"
-  title "  绑定 xboard-node 的 Panel 和 Token"
-  title "══════════════════════════════════════════"
-  echo ""
+# -- 7. 绑定 Panel / Token --
+m7() {
+  echo; echo -e "${W}${C}绑定 Panel 和 Token${N}"; echo
+  need_root || return 1
 
-  if ! need_root_or_sudo; then return 1; fi
+  [ -f /etc/xboard-node/config.yml ] && {
+    local cp; cp=$(grep -E '^[[:space:]]*panel_url:' /etc/xboard-node/config.yml 2>/dev/null | awk '{print $2}' | tr -d "'\"" || echo "未设置")
+    echo -e "  ${B}当前 Panel:${N} $cp"
+    echo
+  }
 
-  local panel_url token machine_id
+  local panel token mid
+  read -r -p "  Panel 地址 (例: https://panel.example.com): " panel
+  [ -z "$panel" ] && { warn "已取消"; return 1; }
+  read -r -p "  Token: " token
+  [ -z "$token" ] && { warn "已取消"; return 1; }
+  read -r -p "  Machine ID [1]: " mid; mid="${mid:-1}"
 
-  # 读取当前配置（如果存在）
-  if [ -f /etc/xboard-node/config.yml ]; then
-    echo -e "${BLUE}当前配置:${NC}"
-    echo "──────────────────────────────────────"
-    # 尝试从 config.yml 提取 panel_url
-    local current_panel
-    current_panel=$(grep -E '^[[:space:]]*panel_url:' /etc/xboard-node/config.yml 2>/dev/null | \
-      awk '{print $2}' | tr -d '"'"'" || echo "未设置")
-    echo "  当前 Panel: ${current_panel}"
-    echo "──────────────────────────────────────"
-    echo ""
-  fi
+  echo; echo "  Panel: ${panel}"; echo "  Token: ${token:0:8}****"; echo "  Machine ID: ${mid}"
+  read -r -p "  确认绑定? [y/N]: " c
+  [ "$c" = "y" ] || [ "$c" = "Y" ] || { info "已取消"; return 0; }
 
-  # 输入新的 panel URL
-  read -r -p "请输入 Panel 地址 (例: https://panel.yourdomain.com): " panel_url
-  if [ -z "$panel_url" ]; then
-    warn "Panel 地址不能为空，已取消。"
-    return 1
-  fi
-
-  # 输入新的 token
-  read -r -p "请输入通信 Token: " token
-  if [ -z "$token" ]; then
-    warn "Token 不能为空，已取消。"
-    return 1
-  fi
-
-  # 输入 machine-id
-  read -r -p "请输入 Machine ID [1]: " machine_id
-  machine_id="${machine_id:-1}"
-
-  echo ""
-  echo "即将使用以下参数绑定:"
-  echo "  Panel:      ${panel_url}"
-  echo "  Token:      ${token:0:8}****"
-  echo "  Machine ID: ${machine_id}"
-  echo ""
-
-  read -r -p "确认绑定？[y/N]: " confirm
-  case "$confirm" in
-    y|Y) ;;
-    *) info "已取消。"; return 0 ;;
-  esac
-
-  echo ""
-
-  # 方法 1: 使用 xbctl config init (如果支持)
   local bound=0
-  if check_xbctl; then
-    info "尝试通过 xbctl config init 更新配置..."
-    if xbctl config init \
-      --mode machine \
-      --panel-url "$panel_url" \
-      --token "$token" \
-      --node-id "$machine_id" \
-      --config /etc/xboard-node/config.yml 2>/dev/null; then
-      success "配置已通过 xbctl 更新。"
-      bound=1
-    else
-      warn "xbctl config init 失败，尝试其他方法..."
-    fi
+  # 方法1: xbctl config init
+  if check_xbctl && xbctl config init --mode machine --panel-url "$panel" --token "$token" --node-id "$mid" --config /etc/xboard-node/config.yml 2>/dev/null; then
+    ok "xbctl 配置更新成功"; bound=1
+  # 方法2: 本地 install.sh
+  elif [ -f "$XBN_INSTALL" ]; then
+    info "通过本地脚本重新配置..."
+    run bash "$XBN_INSTALL" --mode machine --panel "$panel" --token "$token" --machine-id "$mid" 2>/dev/null && { ok "配置完成"; bound=1; } || warn "本地脚本失败"
+  # 方法3: 远程脚本
+  else
+    info "从远程下载安装脚本..."
+    curl -fsSL https://raw.githubusercontent.com/cedar2025/xboard-node/dev/install.sh | run bash -s -- --mode machine --panel "$panel" --token "$token" --machine-id "$mid" && { ok "配置完成"; bound=1; } || err "远程脚本失败"
   fi
 
-  # 方法 2: 重新运行安装脚本
-  if [ "$bound" -eq 0 ] && [ -f "$XBOARD_NODE_INSTALL_SCRIPT" ]; then
-    info "通过安装脚本重新配置..."
-    if run_privileged bash "$XBOARD_NODE_INSTALL_SCRIPT" \
-      --mode machine \
-      --panel "$panel_url" \
-      --token "$token" \
-      --machine-id "$machine_id" 2>/dev/null; then
-      success "配置已通过安装脚本更新。"
-      bound=1
-    else
-      error "安装脚本配置失败。"
-    fi
-  fi
+  [ "$bound" -eq 0 ] && { err "绑定失败"; return 1; }
 
-  # 方法 3: 直接从 URL 重新下载安装脚本
-  if [ "$bound" -eq 0 ]; then
-    info "从远程重新下载安装脚本..."
-    if curl -fsSL https://raw.githubusercontent.com/cedar2025/xboard-node/dev/install.sh | \
-      run_privileged bash -s -- \
-        --mode machine \
-        --panel "$panel_url" \
-        --token "$token" \
-        --machine-id "$machine_id"; then
-      success "配置已通过远程脚本更新。"
-      bound=1
-    else
-      error "远程脚本配置失败。"
-    fi
-  fi
-
-  if [ "$bound" -eq 0 ]; then
-    error "所有绑定方法均失败。请检查网络连接和权限后重试。"
-    return 1
-  fi
-
-  # 重启服务使配置生效
-  echo ""
-  info "重启 xboard-node 服务使配置生效..."
-  if check_xbctl; then
-    run_privileged xbctl restart 2>/dev/null || true
-  fi
-  if command -v systemctl >/dev/null 2>&1; then
-    run_privileged systemctl restart "$XBOARD_NODE_SERVICE" 2>/dev/null || true
-  fi
-
-  success "绑定完成！xboard-node 将使用新的 Panel 和 Token 连接。"
-  echo ""
-  info "可以用以下命令验证:"
-  echo "  xbctl list"
-  echo "  systemctl status ${XBOARD_NODE_SERVICE}"
+  info "重启服务..."
+  check_xbctl && run xbctl restart 2>/dev/null || true
+  command -v systemctl >/dev/null 2>&1 && run systemctl restart "$XBN_SERVICE" 2>/dev/null || true
+  ok "绑定完成"
 }
 
-# 8. 查看端口放行状态
-menu_port_check() {
-  echo ""
-  title "══════════════════════════════════════════"
-  title "  查看端口状态"
-  title "══════════════════════════════════════════"
-  echo ""
-
-  local port
-  read -r -p "请输入要检查的端口号: " port
-
-  if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
-    error "无效的端口号: $port"
-    return 1
-  fi
-
-  echo ""
-  echo -e "${BOLD}检查端口 ${port}:${NC}"
-  echo ""
-
-  # 1. 检查端口是否在监听
-  echo -e "${CYAN}[1] 监听状态:${NC}"
-  if command -v ss >/dev/null 2>&1; then
-    if ss -tlnp 2>/dev/null | grep -q ":${port}\b"; then
-      success "端口 ${port} 正在监听:"
-      ss -tlnp 2>/dev/null | grep ":${port}\b" | while read -r line; do
-        echo "  $line"
-      done
-    else
-      warn "端口 ${port} 未在监听。"
-    fi
-  elif command -v netstat >/dev/null 2>&1; then
-    if netstat -tlnp 2>/dev/null | grep -q ":${port}\b"; then
-      success "端口 ${port} 正在监听:"
-      netstat -tlnp 2>/dev/null | grep ":${port}\b" | while read -r line; do
-        echo "  $line"
-      done
-    else
-      warn "端口 ${port} 未在监听。"
-    fi
-  fi
-
-  echo ""
-
-  # 2. 检查本机防火墙状态
-  echo -e "${CYAN}[2] 本机防火墙状态:${NC}"
+# -- 8. 查看端口状态 --
+m8() {
+  echo; local port
+  read -r -p "  端口号: " port
+  [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || { err "无效端口"; return 1; }
+  echo; echo -e "${W}端口 ${port} 状态:${N}"; echo
+  if ss -tlnp 2>/dev/null | grep -q ":${port}\b"; then
+    ok "正在监听:"; ss -tlnp 2>/dev/null | grep ":${port}\b" | while read -r l; do echo "  $l"; done
+  else warn "未监听"; fi
+  echo
   if command -v ufw >/dev/null 2>&1; then
-    if ufw status 2>/dev/null | grep -q "${port}/tcp"; then
-      success "UFW 已放行 ${port}/tcp:"
-      ufw status 2>/dev/null | grep "${port}/tcp" | while read -r line; do
-        echo "  $line"
-      done
-    else
-      warn "UFW 未放行 ${port}/tcp。"
-    fi
+    ufw status 2>/dev/null | grep -q "${port}/tcp" && ok "UFW 已放行" || warn "UFW 未放行"
   elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-    if firewall-cmd --list-ports 2>/dev/null | grep -q "${port}/tcp"; then
-      success "firewalld 已放行 ${port}/tcp。"
-    else
-      warn "firewalld 未放行 ${port}/tcp。"
-    fi
-  elif command -v iptables >/dev/null 2>&1; then
-    if run_privileged iptables -L INPUT -n 2>/dev/null | grep -q "dpt:${port}\b"; then
-      success "iptables 中存在端口 ${port} 的规则。"
-    else
-      warn "iptables 中未找到端口 ${port} 的规则。"
-    fi
-  else
-    warn "未检测到可管理的防火墙（UFW / firewalld / iptables）。"
+    firewall-cmd --list-ports 2>/dev/null | grep -q "${port}/tcp" && ok "firewalld 已放行" || warn "firewalld 未放行"
   fi
-
-  echo ""
-
-  # 3. 尝试本地连接测试
-  echo -e "${CYAN}[3] 本地连通性测试:${NC}"
-  if timeout 3 bash -c "echo >/dev/tcp/127.0.0.1/${port}" 2>/dev/null; then
-    success "端口 ${port} 本地可连接。"
-  else
-    warn "端口 ${port} 本地不可连接。"
-  fi
-
-  echo ""
-  info "如果本机可访问但公网不可达，请检查云平台安全组/防火墙设置。"
+  timeout 3 bash -c "echo >/dev/tcp/127.0.0.1/${port}" 2>/dev/null && ok "本地可连接" || warn "本地不可达"
 }
 
-# 9. 放行端口
-menu_port_open() {
-  echo ""
-  title "══════════════════════════════════════════"
-  title "  放行端口"
-  title "══════════════════════════════════════════"
-  echo ""
-
-  if ! need_root_or_sudo; then return 1; fi
-
+# -- 9. 放行端口 --
+m9() {
+  echo; need_root || return 1
   local port
-  read -r -p "请输入要放行的端口号: " port
-
-  if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
-    error "无效的端口号: $port"
-    return 1
-  fi
-
-  echo ""
-
-  # 尝试 UFW
+  read -r -p "  端口号: " port
+  [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || { err "无效端口"; return 1; }
   if command -v ufw >/dev/null 2>&1; then
-    run_privileged ufw allow "${port}/tcp" 2>/dev/null && \
-      success "UFW 已放行 ${port}/tcp。"
-    echo ""
-    run_privileged ufw status verbose 2>/dev/null | grep "${port}" || true
-    return 0
+    run ufw allow "${port}/tcp" && ok "UFW 已放行 ${port}/tcp"
+  elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    run firewall-cmd --permanent --add-port="${port}/tcp" && run firewall-cmd --reload && ok "firewalld 已放行 ${port}/tcp"
+  elif command -v iptables >/dev/null 2>&1; then
+    run iptables -A INPUT -p tcp --dport "$port" -j ACCEPT && ok "iptables 已放行 ${port}/tcp" && warn "重启后失效，建议安装 ufw"
+  else
+    err "未找到防火墙，请手动放行"
   fi
-
-  # 尝试 firewalld
-  if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-    run_privileged firewall-cmd --permanent --add-port="${port}/tcp" 2>/dev/null && \
-      success "firewalld 规则已添加。"
-    run_privileged firewall-cmd --reload 2>/dev/null && \
-      success "firewalld 已重载。"
-    echo ""
-    run_privileged firewall-cmd --list-ports 2>/dev/null || true
-    return 0
-  fi
-
-  # 尝试 iptables
-  if command -v iptables >/dev/null 2>&1; then
-    run_privileged iptables -A INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null && \
-      success "iptables 规则已添加: ACCEPT tcp/${port}。"
-    warn "注意: iptables 规则重启后可能丢失。建议安装 UFW: apt-get install -y ufw"
-    return 0
-  fi
-
-  error "未找到可管理的防火墙。请手动放行端口 ${port}。"
-  error "Debian/Ubuntu 可安装 UFW: apt-get install -y ufw"
 }
 
-# ============================================================
-# 显示菜单
-# ============================================================
-show_menu() {
+show() {
   clear
-  echo ""
-  echo -e "${CYAN}╔══════════════════════════════════════════╗${NC}"
-  echo -e "${CYAN}║${NC}       ${BOLD}xboard-node 运维管理菜单${NC}          ${CYAN}║${NC}"
-  echo -e "${CYAN}╠══════════════════════════════════════════╣${NC}"
-  echo -e "${CYAN}║${NC}  ${GREEN}1.${NC} 查看 xboard-node 服务状态           ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}  ${GREEN}2.${NC} 启动 xboard-node 服务               ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}  ${GREEN}3.${NC} 启动 Nginx Proxy Manager            ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}  ${GREEN}4.${NC} 重启 xboard-node 服务               ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}  ${GREEN}5.${NC} 重启 Nginx Proxy Manager            ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}  ${GREEN}6.${NC} 查看 NPM 登录地址                   ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}  ${GREEN}7.${NC} 绑定 Panel 和 Token                 ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}  ${GREEN}8.${NC} 查看端口放行状态                    ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}  ${GREEN}9.${NC} 放行端口                            ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}  ${RED}0.${NC} 退出菜单                            ${CYAN}║${NC}"
-  echo -e "${CYAN}╚══════════════════════════════════════════╝${NC}"
-  echo ""
-
-  local npm_port server_ip
-  npm_port=$(get_npm_port)
-  server_ip=$(detect_ip)
-
-  echo -e "  ${BOLD}快捷信息:${NC}"
-  echo -e "  NPM 后台: ${GREEN}http://${server_ip}:${npm_port}${NC}"
-  if command -v systemctl >/dev/null 2>&1; then
+  echo; echo -e "${C}  ╔══════════════════════════════╗${N}"
+  echo -e "${C}  ║${N}   ${W}xboard-node 运维菜单${N}      ${C}║${N}"
+  echo -e "${C}  ╠══════════════════════════════╣${N}"
+  echo -e "${C}  ║${N} ${G}1${N}. 查看 xboard-node 状态    ${C}║${N}"
+  echo -e "${C}  ║${N} ${G}2${N}. 启动 xboard-node         ${C}║${N}"
+  echo -e "${C}  ║${N} ${G}3${N}. 启动 NPM                 ${C}║${N}"
+  echo -e "${C}  ║${N} ${G}4${N}. 重启 xboard-node         ${C}║${N}"
+  echo -e "${C}  ║${N} ${G}5${N}. 重启 NPM                 ${C}║${N}"
+  echo -e "${C}  ║${N} ${G}6${N}. 查看 NPM 登录信息        ${C}║${N}"
+  echo -e "${C}  ║${N} ${G}7${N}. 绑定 Panel / Token       ${C}║${N}"
+  echo -e "${C}  ║${N} ${G}8${N}. 查看端口状态             ${C}║${N}"
+  echo -e "${C}  ║${N} ${G}9${N}. 放行端口                 ${C}║${N}"
+  echo -e "${C}  ║${N} ${R}0${N}. 退出                     ${C}║${N}"
+  echo -e "${C}  ╚══════════════════════════════╝${N}"
+  echo
+  local port ip; port=$(get_npm_port); ip=$(detect_ip)
+  echo -e "  ${W}NPM:${N} ${G}http://${ip}:${port}${N}"
+  command -v systemctl >/dev/null 2>&1 && {
     echo -n "  xboard-node: "
-    systemctl is-active "$XBOARD_NODE_SERVICE" 2>/dev/null && \
-      echo -e "${GREEN}运行中${NC}" || echo -e "${RED}未运行${NC}"
-  fi
-  echo ""
+    systemctl is-active "$XBN_SERVICE" 2>/dev/null && echo -e "${G}运行中${N}" || echo -e "${R}未运行${N}"
+  }
+  echo
 }
 
-# ============================================================
-# 主循环
-# ============================================================
 main() {
-  # 检查基本依赖
-  if ! command -v docker >/dev/null 2>&1; then
-    warn "Docker 未安装或不在 PATH 中，部分功能不可用。"
-  fi
-
-  if ! command -v curl >/dev/null 2>&1; then
-    warn "curl 未安装，部分功能（IP检测、远程安装）不可用。"
-  fi
-
   while true; do
-    show_menu
-    read -r -p "请输入选项 [0-9]: " choice
-    echo ""
-
-    case "$choice" in
-      1) menu_status;     pause ;;
-      2) menu_xb_start;   pause ;;
-      3) menu_npm_start;  pause ;;
-      4) menu_xb_restart; pause ;;
-      5) menu_npm_restart; pause ;;
-      6) menu_npm_info;   pause ;;
-      7) menu_bind_panel_token; pause ;;
-      8) menu_port_check; pause ;;
-      9) menu_port_open;  pause ;;
-      0)
-        success "已退出管理菜单。下次输入 ling 即可重新进入。"
-        exit 0
-        ;;
-      *)
-        error "无效选项，请输入 0-9。"
-        sleep 1
-        ;;
+    show
+    read -r -p "  选项 [0-9]: " c
+    echo; case "$c" in
+      1) m1; pause ;; 2) m2; pause ;; 3) m3; pause ;;
+      4) m4; pause ;; 5) m5; pause ;; 6) m6; pause ;;
+      7) m7; pause ;; 8) m8; pause ;; 9) m9; pause ;;
+      0) ok "已退出。下次输入 ling 进入。"; exit 0 ;;
+      *) err "无效选项" ; sleep 1 ;;
     esac
   done
 }
-
 main "$@"
